@@ -1,0 +1,113 @@
+# Single Producer Multiple Consumer
+
+## Section
+
+```elixir
+defmodule Client do
+  defstruct [:name, :pid]
+
+  def init(name) do
+    pid = spawn(fn -> keep_receiving(name) end)
+    %Client{name: name, pid: pid}
+  end
+
+  defp keep_receiving(name) do
+    receive do
+      {:hello, value} -> IO.puts("#{name} received: #{value}")
+    end
+
+    keep_receiving(name)
+  end
+end
+```
+
+```elixir
+defmodule MuxSrv do
+  defstruct [:prod_rate, :value, :produce_timer, clients: %{}]
+  use GenServer
+
+  def start(prod_rate), do: GenServer.start_link(__MODULE__, prod_rate, name: __MODULE__)
+  def stop(), do: GenServer.call(__MODULE__, :stop)
+
+  def sub(rate, client = %Client{}), do: GenServer.cast(__MODULE__, {:sub, rate, client})
+  def unsub(client = %Client{}), do: GenServer.cast(__MODULE__, {:unsub, client})
+
+  @impl true
+  def init(prod_rate) do
+    {:ok, timer_ref} = :timer.send_interval(round(1000 / prod_rate), self(), :produce)
+
+    send(self(), :produce)
+    {:ok, %MuxSrv{prod_rate: prod_rate, value: 0, produce_timer: timer_ref}}
+  end
+
+  @impl true
+  def handle_call(:stop, _from, state) do
+    IO.puts("stop")
+    state.clients |> Enum.each(fn {timer_ref, _} -> {:ok, :cancel} = :timer.cancel(timer_ref) end)
+    {:ok, :cancel} = :timer.cancel(state.produce_timer)
+    {:reply, :ok, state}
+  end
+
+  @impl true
+  def handle_info(:produce, state) do
+    # IO.puts("produce")
+    {:noreply, %{state | value: state.value + 1}}
+  end
+
+  @impl true
+  def handle_info({:send, recvr}, state) do
+    send(recvr, {:hello, state.value})
+
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_cast({:sub, rate, client = %Client{pid: recvr}}, state) do
+    IO.puts("sub")
+
+    # start periodic send message
+    {:ok, timer_ref} = start_sending(rate, recvr)
+
+    {:noreply, %{state | clients: Map.put(state.clients, client.name, {timer_ref, client})}}
+  end
+
+  @impl true
+  def handle_cast({:unsub, %Client{name: name}}, state) do
+    IO.puts("unsub")
+
+    # remove periodic send message
+    {timer_ref, _} = Map.get(state.clients, name)
+    {:ok, :cancel} = :timer.cancel(timer_ref)
+
+    {:noreply, %{state | clients: Map.delete(state.clients, name)}}
+  end
+
+  defp start_sending(rate, recvr) do
+    send(self(), {:send, recvr})
+    :timer.send_interval(round(1000 / rate), self(), {:send, recvr})
+  end
+end
+```
+
+```elixir
+clt = Client.init("a")
+
+{:ok, mux} = MuxSrv.start(1000)
+MuxSrv.sub(4, clt)
+
+:timer.sleep(1000)
+
+MuxSrv.unsub(clt)
+
+:timer.sleep(2100)
+
+MuxSrv.stop()
+
+:timer.sleep(2100)
+
+[clt.pid, mux] |> Enum.each(&Process.exit(&1, nil))
+```
+
+```elixir
+Process.list() |> Enum.each(&Process.exit(&1, nil))
+```

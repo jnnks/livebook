@@ -1,0 +1,174 @@
+# Supervised Single Producer Multiple Consumer with GenStage
+
+```elixir
+Mix.install([
+  {:gen_stage, "~> 1.1"}
+])
+```
+
+## Producer
+
+A simple generator emitting events. Each event is a list with the producers name as the only element.
+
+```elixir
+defmodule Producer do
+  use GenStage
+
+  def start_link(name), do: GenStage.start_link(__MODULE__, name, name: name)
+  def init(name), do: {:producer, name, dispatcher: GenStage.BroadcastDispatcher}
+
+  def handle_demand(demand, name) do
+    # build lists according to demand
+    events = 1..demand |> Enum.map(fn _ -> [name] end)
+    {:noreply, events, name}
+  end
+end
+```
+
+## Modifier
+
+The modifier is a simple `consumer_producer` that adds its own name to the front of the list.
+
+```elixir
+defmodule Modifier do
+  use GenStage
+
+  def start_link(name, producers),
+    do: GenStage.start_link(__MODULE__, [name, producers], name: name)
+
+  def init([name, producers]), do: {:producer_consumer, name, subscribe_to: producers}
+
+  def handle_events(events, _from, name) do
+    # add name to every list
+    events = events |> Enum.map(fn l -> [name | l] end)
+    {:noreply, events, name}
+  end
+end
+```
+
+## Rate Limiter
+
+This module will limit the demand of its producers. This is useful for pipelines where timing and constant, near-realtime data processing is important.
+
+```elixir
+defmodule RateLimiter do
+  use GenStage
+
+  def start_link(name, producers),
+    do: GenStage.start_link(__MODULE__, [name, producers], name: name)
+
+  def init([name, producers]), do: {:producer_consumer, {name, %{}}, subscribe_to: producers}
+
+  def handle_subscribe(:producer, opts, from, {name, producers}) do
+    # use default values of not provided
+    pending = opts[:max_demand] || 1000
+    interval = opts[:interval] || 1000
+
+    # Register the producer in the state
+    producers = Map.put(producers, from, {pending, interval})
+    # Ask for the pending events and schedule the next time around
+    producers = ask_and_schedule(producers, from)
+
+    # Returns manual as we want control over the demand
+    {:manual, {name, producers}}
+  end
+
+  def handle_subscribe(_client, _opts, _from, state) do
+    {:automatic, state}
+  end
+
+  def handle_cancel(_, from, {_name, producers}) do
+    # Remove the producers from the map on unsubscribe
+    {:noreply, [], Map.delete(producers, from)}
+  end
+
+  def handle_events(events, from, {name, producers}) do
+    # Bump the amount of pending events for the given producer
+    producers =
+      Map.update!(producers, from, fn {pending, interval} ->
+        {pending + length(events), interval}
+      end)
+
+    events = events |> Enum.map(fn l -> [name | l] end)
+    {:noreply, events, {name, producers}}
+  end
+
+  def handle_info({:ask, from}, {name, producers}) do
+    # This callback is invoked by the Process.send_after/3 message below.
+    {:noreply, [], {name, ask_and_schedule(producers, from)}}
+  end
+
+  defp ask_and_schedule(producers, from) do
+    case producers do
+      %{^from => {pending, interval}} ->
+        # Ask for any pending events
+        GenStage.ask(from, pending)
+        # And let's check again after interval
+        Process.send_after(self(), {:ask, from}, interval)
+        # Finally, reset pending events to 0
+        Map.put(producers, from, {0, interval})
+
+      %{} ->
+        producers
+    end
+  end
+end
+```
+
+## Consumer
+
+```elixir
+defmodule Consumer do
+  use GenStage
+
+  def start_link(name, producers),
+    do: GenStage.start_link(__MODULE__, [name, producers], name: name)
+
+  def init([name, producers]), do: {:consumer, name, subscribe_to: producers}
+
+  def handle_events(events, _from, name) do
+    IO.inspect(events, label: name)
+
+    {:noreply, [], name}
+  end
+end
+```
+
+## main
+
+```elixir
+#  helper to build child spec
+make_child = fn name, module, producers ->
+  %{
+    id: name,
+    start: {module, :start_link, [name, producers]}
+  }
+end
+
+children = [
+  # shared Producer, is BroadcastDispatcher
+  %{
+    id: Producer,
+    start: {
+      Producer,
+      :start_link,
+      [:producer]
+    }
+  },
+
+  # Pipeline A ----
+  make_child.(:modifier, Modifier, [:producer]),
+  make_child.(:limiter, RateLimiter, [{:modifier, max_demand: 1, interval: 100}]),
+  make_child.(:printer, Consumer, [:limiter]),
+
+  # Pipeline B ----
+  make_child.(:modifier_b, Modifier, [:producer]),
+  make_child.(:limiter_b, RateLimiter, [{:modifier_b, max_demand: 1, interval: 1000}]),
+  make_child.(:printer_b, Consumer, [:limiter_b])
+]
+
+{:ok, pid} = Supervisor.start_link(children, strategy: :one_for_one)
+
+:timer.sleep(5000)
+Process.exit(pid, :kill)
+```
