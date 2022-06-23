@@ -1,0 +1,84 @@
+# Object Classification using Tiny YOLOv2
+
+```elixir
+Mix.install([
+  {:axon_onnx, "~> 0.1.0"},
+  {:axon, "~> 0.1.0"},
+  {:pixels, "~> 0.2.1"},
+  {:exla, "~> 0.2.2"}
+])
+```
+
+## Resources
+
+ONNX Model: https://github.com/onnx/models/tree/main/vision/object_detection_segmentation/tiny-yolov2
+Prediction Output Explanation: https://machinethink.net/blog/object-detection-with-yolo/
+Paper: https://arxiv.org/pdf/1612.08242.pdf
+
+Axon Sample: https://gist.github.com/seanmor5/dc077ea5dcc44f6e9d4fbfb34d834552
+
+```elixir
+{model, params} = AxonOnnx.import("/home/livebook/tinyyolov2-7.onnx")
+```
+
+```elixir
+{:ok, image} = Pixels.read_file("/home/livebook/dog.png")
+%{data: data, height: height, width: width} = image
+
+data =
+  :binary.bin_to_list(data)
+  |> Enum.chunk_every(4)
+  |> Enum.map(fn [r, g, b, _a] -> [r, g, b] end)
+  |> List.flatten()
+
+dog_tensor =
+  data
+  |> Nx.tensor(type: :u8)
+  |> Nx.reshape({3, height, width}, names: [:channels, :height, :width])
+  |> Nx.divide(255.0)
+```
+
+```elixir
+classes = [
+  "aeroplane",
+  "bicycle",
+  "bird",
+  "boat",
+  "bottle",
+  "bus",
+  "car",
+  "cat",
+  "chair",
+  "cow",
+  "diningtable",
+  "dog",
+  "horse",
+  "motorbike",
+  "person",
+  "pottedplant",
+  "sheep",
+  "sofa",
+  "train",
+  "tvmonitor"
+]
+
+anchors = [1.08, 1.19, 3.42, 4.41, 6.63, 11.38, 9.42, 5.11, 16.62, 10.52]
+```
+
+```elixir
+result = Axon.predict(model, params, Nx.stack([dog_tensor]), compiler: EXLA)
+result = result[0] |> Nx.reshape({13, 13, 5, 25})
+
+for row <- 0..12 do
+  for col <- 0..12 do
+    for box <- 0..4 do
+      row = result[row][col][box]
+      [tx, ty, tw, th, tc | rest] = Nx.to_flat_list(row)
+      IO.inspect([tx, ty, tw, th, tc])
+    end
+  end
+end
+
+# length(numbers |> Enum.at(0))
+# numbers
+```
