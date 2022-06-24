@@ -17,7 +17,6 @@ defmodule Counter do
   end
 
   def handle_demand(demand, counter) when demand > 0 do
-    events = Enum.to_list(counter..(counter + demand - 1))
     {:noreply, [counter + 1], counter + demand}
   end
 end
@@ -25,28 +24,28 @@ end
 
 ```elixir
 defmodule CounterMessageTransformer do
-  def transform(event, opts),
+  def transform(event, _opts),
     do: %Broadway.Message{
       data: {event, DateTime.to_time(DateTime.utc_now())},
       acknowledger: {__MODULE__, :ack_id, event}
     }
 
-  def ack(_ref, successes, _failures), do: successes |> IO.inspect()
+  def ack(_ref, _successes, _failures), do: :ok
 end
 ```
 
 ```elixir
-defmodule Processor do
-  use GenStage
+# defmodule Processor do
+#   use GenStage
 
-  def init(:hello) do
-    {:producer_consumer, :state}
-  end
+#   def init(:hello) do
+#     {:producer_consumer, :state}
+#   end
 
-  def process(message, state) do
-    IO.inspect([message, state], label: "Processor")
-  end
-end
+#   def process(message, state) do
+#     IO.inspect([message, state], label: "Processor")
+#   end
+# end
 ```
 
 ```elixir
@@ -64,7 +63,7 @@ defmodule MyBroadway do
           interval: 1_000
         ]
       ],
-      processors: [[default: [moduleconcurrency: 1, max_demand: 1]]]
+      processors: [default: [concurrency: 1, max_demand: 1]]
     )
   end
 
