@@ -1,0 +1,59 @@
+# y4m Decode
+
+## Section
+
+```elixir
+{:ok, contents} = File.read("farmland_512x288.y4m")
+lines = String.split(contents, "\n")
+length(lines)
+
+# skip "FRAME"
+# [_ | rest] = rest
+
+# length(rest)
+```
+
+```elixir
+[header | frame_list] = lines
+header_length = byte_size(header)
+IO.inspect(header_length)
+
+[magic | rest] = String.split(header)
+true = magic == "YUV4MPEG2"
+
+[width | [height | rest]] = rest
+true = width == "W512"
+true = height == "H288"
+
+[frame_rate | rest] = rest
+true = frame_rate == "F2:1"
+
+[interlacing | rest] = rest
+true = interlacing == "Ip"
+
+[aspect_ratio | rest] = rest
+true = aspect_ratio == "A1:1"
+
+# rest = Enum.drop(rest, 3)
+[color_space | rest] = rest
+true = color_space == "C444"
+[xy_color_space | rest] = rest
+true = xy_color_space == "XYSCSS=444"
+[color_range | rest] = rest
+true = color_range == "XCOLORRANGE=LIMITED"
+
+[_ | frames] = frame_list
+length(frames)
+```
+
+```elixir
+# new_frames |> Enum.map(&byte_size/1) |> Enum.sum()
+# IO.inspect(byte_size(rest))
+frames
+|> Enum.map(fn f -> byte_size(f) end)
+|> Enum.sort(:asc)
+
+#  |> length()
+
+# IO.inspect(frames)
+```
