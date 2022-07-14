@@ -1,59 +1,275 @@
 # y4m Decode
 
-## Section
+```elixir
+Mix.install([
+  {:nx, "~> 0.2.1"},
+  {:axon, "~> 0.1.0"},
+  {:exla, "~> 0.2"}
+])
+```
+
+## Parsing File Header
+
+Each YUV4MPEG2 file has a header that contains metadata about the file. The information is plain text with ACSII encoding, so one byte = one character.
+More information can be found here: https://wiki.multimedia.cx/index.php/YUV4MPEG2
 
 ```elixir
-{:ok, contents} = File.read("farmland_512x288.y4m")
-lines = String.split(contents, "\n")
-length(lines)
+defmodule HeaderParser do
+  def parse(header_line) do
+    case String.split(header_line) do
+      ["YUV4MPEG2" | rest] -> continue(rest, %{})
+      _ -> {:error, "file does not have expected header"}
+    end
+  end
 
-# skip "FRAME"
-# [_ | rest] = rest
+  defp continue([], props), do: props
 
-# length(rest)
+  defp continue([<<"W", width::binary>> | t], props) do
+    case Integer.parse(width) do
+      {width, _} -> continue(t, Map.put(props, :width, width))
+      :error -> {:error, "cannot parse width: #{width}"}
+    end
+  end
+
+  defp continue([<<"H", height::binary>> | t], props) do
+    case Integer.parse(height) do
+      {height, _} -> continue(t, Map.put(props, :height, height))
+      :error -> {:error, "cannot parse height: #{height}"}
+    end
+  end
+
+  defp continue([<<"F", frame_rate::binary>> | t], props) do
+    with [nom, den] <- String.split(frame_rate, ":"),
+         [{nom, rest}, {den, rest}] <- Enum.map([nom, den], &Integer.parse/1) do
+      continue(t, Map.put(props, :frame_rate, [nom, den]))
+    else
+      _ -> {:error, "cannot parse frame rate: #{frame_rate}"}
+    end
+  end
+
+  defp continue([<<"I", interlacing::binary>> | t], props) do
+    case interlacing do
+      "p" -> continue(t, Map.put(props, :interlacing, :progressive))
+      "t" -> continue(t, Map.put(props, :interlacing, :top_field_first))
+      "b" -> continue(t, Map.put(props, :interlacing, :bottom_field_first))
+      "m" -> continue(t, Map.put(props, :interlacing, :mixed))
+      _ -> {:error, "unknown interlacing: #{interlacing}"}
+    end
+  end
+
+  defp continue([<<"A", aspect_ratio::binary>> | t], props) do
+    with [nom, den] <- String.split(aspect_ratio, ":"),
+         [{nom, rest}, {den, rest}] <- Enum.map([nom, den], &Integer.parse/1) do
+      continue(t, Map.put(props, :aspect_ratio, [nom, den]))
+    else
+      _ -> {:error, "cannot parse aspect ration: #{aspect_ratio}"}
+    end
+  end
+
+  defp continue([<<"C", color_space::binary>> | t], props) do
+    case color_space do
+      "420jpeg" -> continue(t, Map.put(props, :color_space, :C420jpeg))
+      "420paldv" -> continue(t, Map.put(props, :color_space, :C420paldv))
+      "420" -> continue(t, Map.put(props, :color_space, :C420))
+      "422" -> continue(t, Map.put(props, :color_space, :C422))
+      "444" -> continue(t, Map.put(props, :color_space, :C444))
+      "mono" -> continue(t, Map.put(props, :color_space, :Cmono))
+      _ -> {:error, "unknown color space: #{color_space}"}
+    end
+  end
+
+  defp continue([<<"X", param::binary>> | t], props) do
+    [name, value] =
+      param
+      |> String.split("=")
+
+    params = Map.get(props, :params, [])
+    continue(t, Map.put(props, :params, [[name, value] | params]))
+  end
+end
 ```
 
 ```elixir
-[header | frame_list] = lines
-header_length = byte_size(header)
-IO.inspect(header_length)
-
-[magic | rest] = String.split(header)
-true = magic == "YUV4MPEG2"
-
-[width | [height | rest]] = rest
-true = width == "W512"
-true = height == "H288"
-
-[frame_rate | rest] = rest
-true = frame_rate == "F2:1"
-
-[interlacing | rest] = rest
-true = interlacing == "Ip"
-
-[aspect_ratio | rest] = rest
-true = aspect_ratio == "A1:1"
-
-# rest = Enum.drop(rest, 3)
-[color_space | rest] = rest
-true = color_space == "C444"
-[xy_color_space | rest] = rest
-true = xy_color_space == "XYSCSS=444"
-[color_range | rest] = rest
-true = color_range == "XCOLORRANGE=LIMITED"
-
-[_ | frames] = frame_list
-length(frames)
+{:ok, file} = File.open("farmland_512x288.y4m")
+header = IO.read(file, :line)
+HeaderParser.parse(header)
 ```
 
+## Reading Frames using IO.binstream
+
+With this solution we are reading from disk in chunks. Each chunk is an entire frame including the FRAME header. Each chunk has to be split into the three planes, which takes time and uses lots of memory, as each frame is present twice.
+
 ```elixir
-# new_frames |> Enum.map(&byte_size/1) |> Enum.sum()
-# IO.inspect(byte_size(rest))
-frames
-|> Enum.map(fn f -> byte_size(f) end)
-|> Enum.sort(:asc)
+defmodule BinStreamParser do
+  def all_frames(file, plane_len) do
+    # read file in batches
+    #   one batch = frame header + three planes  
+    IO.binstream(file, plane_len * 3 + 6)
+    # skip frame header and newline
+    |> Enum.map(fn <<70, 82, 65, 77, 69, _, frame::binary>> ->
+      :binary.bin_to_list(frame) |> Enum.chunk_every(plane_len)
+    end)
+  end
+end
+```
 
-#  |> length()
+## Reading Frames using IO.binread
 
-# IO.inspect(frames)
+This is a bit more code than above but a lot faster (3x).
+Each plane is read directly and converted to a list. The list of frames needs to be reversed due to the recursion.
+
+```elixir
+defmodule BinReadParser do
+  def all_frames(file, plane_len) do
+    frame = next(file, plane_len)
+
+    if frame == :eof do
+      []
+    else
+      [frame | all_frames(file, plane_len)]
+    end
+  end
+
+  def next(file, plane_len) do
+    # read six byte and look for magic frame header
+    case IO.binread(file, 6) do
+      "FRAME\n" ->
+        # read the three color planes from the file
+        y_plane = IO.binread(file, plane_len)
+        u_plane = IO.binread(file, plane_len)
+        v_plane = IO.binread(file, plane_len)
+
+        # convert them to lists and continue reading
+        [y_plane, u_plane, v_plane] |> Enum.map(&:binary.bin_to_list/1)
+
+      :eof ->
+        :eof
+
+      _ ->
+        :error
+    end
+  end
+end
+```
+
+<!-- livebook:{"branch_parent_index":2} -->
+
+## Performance Test for FrameParsers
+
+We are branching this section off of the main document so that the perf test is not required to run for the next code blocks.
+
+```elixir
+defmodule Test do
+  def perf(module) do
+    times =
+      0..10
+      |> Enum.map(fn _ ->
+        # 52 frame long video
+        {:ok, file} = File.open("farmland_512x288.y4m")
+        header = IO.read(file, :line)
+
+        %{width: w, height: h} = HeaderParser.parse(header)
+        plane_len = w * h
+
+        # banchmark only frame extraction
+        {time, frames} = :timer.tc(&module.all_frames/2, [file, plane_len])
+        time / length(frames)
+      end)
+
+    # calculate frame time average across all runs
+    Float.round((times |> Enum.sum()) / (length(times) * 1_000), 2)
+  end
+end
+
+[stream, read] = [Test.perf(BinStreamParser), Test.perf(BinReadParser)]
+IO.puts("binstream: #{stream}ms/f")
+IO.puts("binread: #{read}ms/f")
+```
+
+## Combining both Header and Frame Parser
+
+
+
+```elixir
+defmodule Y4MReader do
+  defstruct file: nil, properties: %{}, fcount: 0
+
+  def open(file_path) do
+    with {:ok, file} <- File.open(file_path),
+         header <- IO.read(file, :line),
+         props <- HeaderParser.parse(header) do
+      {:ok,
+       %Y4MReader{
+         file: file,
+         properties: props,
+         fcount: 0
+       }}
+    end
+  end
+
+  def frames(y4m_reader = %Y4MReader{}) do
+    [w, h] = [y4m_reader.properties.width, y4m_reader.properties.height]
+    BinReadParser.next(y4m_reader.file, w * h)
+  end
+end
+
+{:ok, reader} = Y4MReader.open("farmland_512x288.y4m")
+```
+
+## Resizing Frames
+
+We can resize frames by turning them into tensors and then use an Axon model with a single layer to "*predict*" a resized frame.
+We can use the CPU or the GPU for this task.
+
+```elixir
+{h, w} = {reader.properties.height, reader.properties.width}
+
+tensor =
+  Y4MReader.frames(reader)
+  |> Nx.tensor()
+  |> Nx.reshape({3, h, w})
+
+model =
+  Axon.input({nil, 3, h, w}, "in")
+  |> Axon.resize({144, 256})
+
+params = Axon.init(model)
+
+resized_rensor =
+  Axon.predict(model, params, Nx.stack([tensor]), compiler: EXLA)
+  |> Nx.reshape({3, 144, 256})
+
+:ok
+```
+
+## Performance Comparison with and without EXLA
+
+```elixir
+count = 1000
+
+do_resize = fn ->
+  1..count
+  |> Enum.each(fn _ ->
+    Axon.predict(model, params, Nx.stack([tensor]))
+  end)
+end
+
+do_resize_exla = fn ->
+  1..count
+  |> Enum.each(fn _ ->
+    Axon.predict(model, params, Nx.stack([tensor]), compiler: EXLA)
+  end)
+end
+
+{micros, _} = :timer.tc(do_resize, [])
+raw_time = Float.round(micros / count / 1000, 2)
+
+{micros, _} = :timer.tc(do_resize_exla, [])
+exla_time = Float.round(micros / count / 1000, 2)
+
+IO.puts("without EXLA: #{raw_time}ms/f")
+IO.puts("with EXLA: #{exla_time}ms/f")
+
+# without EXLA: 414.14ms/f
+# with EXLA:      1.17ms/f
 ```
