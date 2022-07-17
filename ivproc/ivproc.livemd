@@ -1,0 +1,60 @@
+# Image and Video Processing with Nx and Axon
+
+```elixir
+Mix.install([
+  {:nx, "~> 0.1"},
+  {:axon, "~> 0.1"},
+  {:axon_onnx, "~> 0.1"},
+  {:exla, "~> 0.2"},
+  {:y4m, git: "https://github.com/jnnks/y4m"}
+])
+```
+
+## Introduction
+
+We will take a sample video and read it from disk, rescale it using Axon and then upscale it again using a convolutional neural network. This is a semi-synthetic proof-of-concept.
+
+This does not work yet, as the imported superscaler model has issues with a parameter. The last code block will fail with: `** (ArithmeticError) bad argument in arithmetic expression: nil * 1`.
+
+```elixir
+frames =
+  Y4MDecoder.open("ivproc/farmland_512x288.y4m")
+  |> Y4MDecoder.iter_frames()
+  |> Enum.map(fn f -> f end)
+
+IO.puts("read #{length(frames)} frames")
+```
+
+```elixir
+frames =
+  frames
+  |> Enum.map(fn f ->
+    Nx.tensor(f) |> Nx.reshape({3, 288, 512})
+  end)
+
+:ok
+```
+
+```elixir
+downscaler =
+  Axon.input({nil, 3, 288, 512}, "in")
+  |> Axon.resize({224, 224}, method: :linear)
+
+downscaled_frames =
+  frames
+  |> Enum.map(fn frame ->
+    Axon.predict(downscaler, %{}, Nx.stack([frame]), compiler: EXLA)
+  end)
+```
+
+```elixir
+{supres, params} = AxonOnnx.import("ivproc/super-resolution-10.onnx")
+
+upscaled_frames =
+  downscaled_frames
+  |> Enum.map(fn frame ->
+    IO.inspect(frame)
+    frame = frame |> Nx.reshape({3, 1, 224, 224})
+    Axon.predict(supres, params, frame, compiler: EXLA)
+  end)
+```
