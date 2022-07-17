@@ -8,6 +8,10 @@ Mix.install([
 ])
 ```
 
+## This is a proof-of-concept which ended up as a library on github
+
+https://github.com/jnnks/y4m
+
 ## Parsing File Header
 
 Each YUV4MPEG2 file has a header that contains metadata about the file. The information is plain text with ACSII encoding, so one byte = one character.
@@ -152,7 +156,7 @@ defmodule BinReadParser do
 end
 ```
 
-<!-- livebook:{"branch_parent_index":2} -->
+<!-- livebook:{"branch_parent_index":3} -->
 
 ## Performance Test for FrameParsers
 
@@ -187,8 +191,6 @@ IO.puts("binread: #{read}ms/f")
 ```
 
 ## Combining both Header and Frame Parser
-
-
 
 ```elixir
 defmodule Y4MReader do
